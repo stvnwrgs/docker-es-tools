@@ -30,6 +30,7 @@ OPTIONS:
   -e    Elasticsearch URL (default: http://localhost:9200)
   -g    Consistent index name (default: logstash)
   -o    Output actions to a specified file
+  -r    instead of single execution, repeat the command every x seconds
 
 EXAMPLES:
 
@@ -39,7 +40,7 @@ EXAMPLES:
     'logstash'. Keep the top lexicographical 14 indices, delete any others.
 
   ./elasticsearch-remove-old-indices.sh -e "http://es.example.com:9200" \
-  -i 28 -g my-logs -o /mnt/es/logfile.log
+  -i 28 -g my-logs -o /mnt/es/logfile.log -r 60
 
     Connect to http://es.example.com:9200 and get a list of indices matching
     'my-logs'. Keep the top 28 indices, delete any others. When using a custom
@@ -50,14 +51,15 @@ EOF
 }
 
 # Defaults
-ELASTICSEARCH="http://localhost:9200"
-KEEP=14
-GREP="logstash"
+OPT_ELASTICSEARCH="http://localhost:9200"
+OPT_KEEP=14
+OPT_GREP="logstash"
+OPT_REPEAT=0
 
 # Validate numeric values
 RE_D="^[0-9]+$"
 
-while getopts ":i:e:g:o:h" flag
+while getopts ":i:e:g:o:r:h" flag
 do
   case "$flag" in
     h)
@@ -72,13 +74,16 @@ do
       fi
       ;;
     e)
-      ELASTICSEARCH=$OPTARG
+      OPT_ELASTICSEARCH=$OPTARG
       ;;
     g)
-      GREP=$OPTARG
+      OPT_GREP=$OPTARG
       ;;
     o)
-      LOGFILE=$OPTARG
+      OPT_LOGFILE=$OPTARG
+      ;;
+    r)
+      OPT_REPEAT=$OPTARG
       ;;
     ?)
       usage
@@ -94,42 +99,50 @@ if [ -n "$ERROR" ]; then
   exit 1
 fi
 
-# Get the indices from elasticsearch
-INDICES_TEXT=`curl -s "$ELASTICSEARCH/_status?pretty=true" | grep $GREP | grep -v \"index\" | sort -r | awk -F\" {'print $2'}`
+# $1 $ELASTICSEARCH, $2 $GREP, $3 LOGFILE
+function execute {
+  ELASTICSEARCH=${1}
+  GREP=${2}
+  LOGFILE=${3}
+  # Get the indices from elasticsearch
+  # | grep $GREP | sort -k | awk -F\" {'print $3'}`
+  INDICES_TEXT=$(curl -s "${ELASTICSEARCH}/_cat/indices?s=creation.date:desc" | grep -v ${GREP}| awk '{print $3}')
+  # if [ -z "$INDICES_TEXT" ]; then
+  #   echo "No indices returned containing '$GREP' from $ELASTICSEARCH."
+  #   exit 1
+  # fi
 
-if [ -z "$INDICES_TEXT" ]; then
-  echo "No indices returned containing '$GREP' from $ELASTICSEARCH."
-  exit 1
-fi
+  # # If we are logging, make sure we have a logfile TODO - handle errors here
+  if [ -n "$LOGFILE" ] && ! [ -e $LOGFILE ]; then
+    touch $LOGFILE
+  fi
 
-# Get the indices from elasticsearch
-INDICES_TEXT=`curl -s "$ELASTICSEARCH/_status?pretty=true" | grep $GREP | grep -v \"index\" | sort -r | awk -F\" {'print $2'}`
+  # # Delete indices
+  declare -a INDEX=($INDICES_TEXT)
+  if [ ${#INDEX[@]} -gt $KEEP ]; then
+    for ELEMENT in ${INDEX[@]:$KEEP};do
+      echo $ELEMENT
+      if [ -n "$ELEMENT" ]; then
+        if [ -z "$LOGFILE" ]; then
+          curl -s -XDELETE "$ELASTICSEARCH/$ELEMENT/" > /dev/null
 
-if [ -z "$INDICES_TEXT" ]; then
-  echo "No indices returned containing '$GREP' from $ELASTICSEARCH."
-  exit 1
-fi
-
-# If we are logging, make sure we have a logfile TODO - handle errors here
-if [ -n "$LOGFILE" ] && ! [ -e $LOGFILE ]; then
-  touch $LOGFILE
-fi
-
-# Delete indices
-declare -a INDEX=($INDICES_TEXT)
-if [ ${#INDEX[@]} -gt $KEEP ]; then
-  for index in ${INDEX[@]:$KEEP};do
-    # We don't want to accidentally delete everything
-    if [ -n "$index" ]; then
-      if [ -z "$LOGFILE" ]; then
-        curl -s -XDELETE "$ELASTICSEARCH/$index/" > /dev/null
-
-      else
-        echo `date "+[%Y-%m-%d %H:%M] "`" Deleting index: $index." >> $LOGFILE
-        curl -s -XDELETE "$ELASTICSEARCH/$index/" >> $LOGFILE
+        else
+          echo `date "+[%Y-%m-%d %H:%M] "`" Deleting index: $ELEMENT." >> $LOGFILE
+          curl -s -XDELETE "$ELASTICSEARCH/$index/" >> $LOGFILE
+        fi
       fi
-    fi
-  done
+    done
+  fi
+}
+
+if  [ $OPT_REPEAT -eq 0 ]; then
+  execute ${OPT_ELASTICSEARCH} ${OPT_GREP} ${OPT_LOGFILE}
+else
+  while true; do
+    execute ${OPT_ELASTICSEARCH} ${OPT_GREP} ${OPT_LOGFILE}
+    sleep ${OPT_REPEAT}
+    echo "sleep";
+  done;
 fi
 
 exit 0
